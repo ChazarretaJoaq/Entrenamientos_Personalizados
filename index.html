@@ -37,6 +37,8 @@ main{max-width:860px;margin:0 auto;padding:14px 12px 90px}
 .cal .d.today{border-color:var(--acc)}
 .cal .d.tr{background:var(--acc2)}
 .cal .d.sel{background:var(--acc);color:#fff}
+.gen{background:var(--bg);border:1px dashed var(--line);border-radius:12px;padding:10px;margin-top:6px}
+.gen select{flex:1;width:auto}
 .tot{font-weight:700}.tot.bad{color:var(--warn)}
 .dots{display:flex;gap:3px;margin-top:4px}
 .dot{width:6px;height:6px;border-radius:50%}
@@ -121,18 +123,36 @@ function seed(){
   ].map(([name,cat,dur,desc,level])=>({id:uid(),name,cat,dur,desc,level}));
   return {version:0,config:{days:[2,4],dur:90,time:"19:00"},players:[],exercises:ex,sessions:[]};
 }
-// plantillas de 90' que alternan según el día
-const TPL={
-  2:{title:"Técnica y físico",items:[["Movilidad",10],["Rondo",12],["Conducción",10],["Intermitente",12],["Circuito",20],["Juego reducido",18],["Vuelta a la calma",8]]},
-  4:{title:"Táctica y definición",items:[["Movilidad",10],["Escalera",8],["Pase y control",10],["Salida",20],["Finalización",15],["Juego reducido",20],["Vuelta a la calma",7]]}
-};
+// entrenamientos ya definidos (minutos sobre 90', se ajustan a la duración configurada)
+const TEMPLATES=[
+  {name:"Técnica y físico",items:[["Movilidad",10],["Rondo",12],["Conducción",10],["Intermitente",12],["Circuito",20],["Juego reducido",18],["Vuelta a la calma",8]]},
+  {name:"Táctica y definición",items:[["Movilidad",10],["Escalera",8],["Pase y control",10],["Salida",20],["Finalización",15],["Juego reducido",20],["Vuelta a la calma",7]]},
+  {name:"Posesión y presión",items:[["Movilidad",10],["Rondo",12],["Pase y control",10],["Presión",15],["Salida",20],["Juego reducido",15],["Vuelta a la calma",8]]},
+  {name:"Velocidad y definición",items:[["Movilidad",10],["Escalera",8],["Sprints",10],["Conducción",7],["Finalización",15],["Remate",12],["Juego reducido",20],["Vuelta a la calma",8]]},
+  {name:"Físico intenso",items:[["Movilidad",10],["Escalera",8],["Intermitente",12],["Circuito",20],["Sprints",10],["Juego reducido",22],["Vuelta a la calma",8]]}
+];
+const TPL={2:TEMPLATES[0],4:TEMPLATES[1]};
+function fitItems(items,dur){const tot=items.reduce((a,i)=>a+i.min,0);if(tot&&tot!==dur){let acc=0;items.forEach((it,i)=>{it.min=i===items.length-1?dur-acc:Math.max(1,Math.round(it.min*dur/tot));acc+=it.min})}return items}
+function tplItems(tpl,dur){return fitItems(tpl.items.map(([n,min])=>{const e=S.exercises.find(x=>x.name.startsWith(n));return e?{exId:e.id,min}:null}).filter(Boolean),dur)}
 function genSession(date){
   const dow=parse(date).getDay(),cfg=S.config,days=cfg.days.slice().sort();
   const tpl=TPL[dow]||(days.indexOf(dow)%2?TPL[4]:TPL[2]);
-  let items=tpl.items.map(([n,min])=>{const e=S.exercises.find(x=>x.name.startsWith(n));return e?{exId:e.id,min}:null}).filter(Boolean);
-  const tot=items.reduce((a,i)=>a+i.min,0);
-  if(tot&&tot!==cfg.dur){let acc=0;items.forEach((it,i)=>{it.min=i===items.length-1?cfg.dur-acc:Math.max(1,Math.round(it.min*cfg.dur/tot));acc+=it.min});}
-  return {id:uid(),date,time:cfg.time,title:tpl.title,type:"grupal",playerIds:S.players.map(p=>p.id),items,done:false,notes:"",logs:{}};
+  return {id:uid(),date,time:cfg.time,title:tpl.name,type:"grupal",playerIds:S.players.map(p=>p.id),items:tplItems(tpl,cfg.dur),done:false,notes:"",logs:{}};
+}
+// mix automático: entrada en calor + ejercicios alternando los tipos elegidos + vuelta a la calma, ajustado a la duración
+const MIX_CATS=["Técnica","Táctica","Físico","Velocidad","Definición","Arquero"];
+const MIX_ORDER=["Velocidad","Técnica","Arquero","Definición","Táctica","Físico"];
+function genMix(cats,dur){
+  const shuf=a=>{a=a.slice();for(let i=a.length-1;i>0;i--){const j=Math.floor(Math.random()*(i+1));[a[i],a[j]]=[a[j],a[i]]}return a};
+  const cool=S.exercises.find(e=>e.name.startsWith("Vuelta a la calma"));
+  const warm=shuf(S.exercises.filter(e=>e.cat==="Movilidad"&&e!==cool))[0];
+  const fixed=(warm?warm.dur:0)+(cool?cool.dur:0);
+  const pools=shuf(cats).map(c=>shuf(S.exercises.filter(e=>e.cat===c))).filter(p=>p.length);
+  const mid=[];let left=dur-fixed,k=0,guard=0;
+  while(left>=5&&pools.some(p=>p.length)&&guard++<60){const p=pools[k++%pools.length];if(!p.length)continue;const e=p.shift();mid.push({exId:e.id,min:e.dur,c:e.cat});left-=e.dur}
+  mid.sort((a,b)=>MIX_ORDER.indexOf(a.c)-MIX_ORDER.indexOf(b.c));mid.forEach(i=>delete i.c);
+  fitItems(mid,Math.max(mid.length,dur-fixed));
+  return [...(warm?[{exId:warm.id,min:warm.dur}]:[]),...mid,...(cool?[{exId:cool.id,min:cool.dur}]:[])];
 }
 
 const today=iso(new Date());
@@ -359,7 +379,7 @@ function exOptions(){return Object.keys(CATS).map(c=>{const l=S.exercises.filter
 function editSess(id,dateDefault){
   const s0=id?S.sessions.find(s=>s.id===id):null;
   const d=s0?JSON.parse(JSON.stringify(s0)):{id:uid(),date:dateDefault||U.day,time:S.config.time,title:"",type:"grupal",playerIds:S.players.map(p=>p.id),items:[],done:false,notes:"",logs:{}};
-  const m=modal("");
+  const m=modal("");let focus=["Técnica","Táctica","Definición"];
   function draw(){
     const total=d.items.reduce((a,i)=>a+(+i.min||0),0);
     m.innerHTML=`<h2>${s0?"Editar sesión":"Nueva sesión"}</h2>
@@ -368,6 +388,9 @@ function editSess(id,dateDefault){
     <label class="f">Tipo</label><div class="chips"><button class="chip ${d.type==="grupal"?"on":""}" data-ty="grupal">👥 Grupal</button><button class="chip ${d.type==="individual"?"on":""}" data-ty="individual">👤 Individual</button></div>
     <label class="f">Jugadores (${d.playerIds.length})</label><div class="chips">${S.players.map(p=>`<button class="chip ${d.playerIds.includes(p.id)?"on":""}" data-pl="${p.id}">${esc(p.name)}</button>`).join("")||`<span class="mut">Primero cargá jugadores en la pestaña Jugadores.</span>`}</div>
     <label class="f">Ejercicios · <span class="tot ${d.type==="grupal"&&total!==S.config.dur?"bad":""}">${total} / ${S.config.dur} min</span>${d.type==="grupal"&&total!==S.config.dur?` · ${total<S.config.dur?"faltan "+(S.config.dur-total):"sobran "+(total-S.config.dur)} min`:""}</label>
+    <div class="gen"><div class="row"><select id="tplSel"><option value="">Entrenamiento definido…</option>${TEMPLATES.map((t,i)=>`<option value="${i}">${t.name}</option>`).join("")}</select><button class="btn sec" id="tplBtn">Usar</button></div>
+    <div class="mut" style="margin-top:10px">🎲 Mix automático con:</div><div class="chips" style="margin-top:6px">${MIX_CATS.map(c=>`<button class="chip ${focus.includes(c)?"on":""}" data-fc="${c}">${c}</button>`).join("")}</div>
+    <button class="btn" id="mixBtn" style="margin-top:10px;width:100%">${d._autoTitle&&d._autoTitle.startsWith("Mix")?"🎲 Generar otro mix":"🎲 Generar mix de "+durTxt(S.config.dur)}</button></div>
     ${d.items.map((it,i)=>{const e=exById(it.exId);return `<div class="item"><span class="dot" style="background:${CATS[e?.cat]||"#999"};width:10px;height:10px"></span><span class="sp">${esc(e?.name||"(eliminado)")}</span><input type="number" min="1" value="${it.min}" data-min="${i}"><span class="mut">min</span><button class="ico" data-up="${i}">↑</button><button class="ico" data-rm="${i}">✕</button></div>`}).join("")}
     <div class="row" style="margin-top:8px"><select id="addEx">${exOptions()}</select><button class="btn sec" id="addBtn">Agregar</button></div>
     <label class="f">Notas</label><textarea id="nt" placeholder="Objetivo, material, cancha…">${esc(d.notes)}</textarea>
@@ -377,11 +400,15 @@ function editSess(id,dateDefault){
     m.querySelectorAll("[data-pl]").forEach(b=>b.onclick=()=>{keep();const p=b.dataset.pl;if(d.type==="individual")d.playerIds=[p];else d.playerIds=d.playerIds.includes(p)?d.playerIds.filter(x=>x!==p):[...d.playerIds,p];draw()});
     m.querySelectorAll("[data-rm]").forEach(b=>b.onclick=()=>{keep();d.items.splice(+b.dataset.rm,1);draw()});
     m.querySelectorAll("[data-up]").forEach(b=>b.onclick=()=>{keep();const i=+b.dataset.up;if(i>0){[d.items[i-1],d.items[i]]=[d.items[i],d.items[i-1]]}draw()});
+    m.querySelectorAll("[data-fc]").forEach(b=>b.onclick=()=>{keep();const c=b.dataset.fc;focus=focus.includes(c)?focus.filter(x=>x!==c):[...focus,c];draw()});
+    const autoTitle=t=>{if(!d.title.trim()||d.title===d._autoTitle){d.title=t;d._autoTitle=t}};
+    m.querySelector("#tplBtn").onclick=()=>{keep();const v=m.querySelector("#tplSel").value;if(v==="")return;const t=TEMPLATES[+v];d.items=tplItems(t,S.config.dur);autoTitle(t.name);draw()};
+    m.querySelector("#mixBtn").onclick=()=>{keep();if(!focus.length){toast("Elegí al menos un tipo de trabajo");return}d.items=genMix(focus,S.config.dur);autoTitle("Mix: "+focus.join(" + "));draw()};
     m.querySelector("#addBtn").onclick=()=>{keep();const e=exById(m.querySelector("#addEx").value);if(e)d.items.push({exId:e.id,min:e.dur});draw()};
     m.querySelector("#cx").onclick=closeModal;
     if(s0)m.querySelector("#del").onclick=()=>ask("Se elimina la sesión y su registro.","Eliminar",()=>{S.sessions=S.sessions.filter(s=>s.id!==d.id);save("Sesión eliminada")});
     m.querySelector("#ok").onclick=()=>{keep();if(!d.title.trim())d.title=d.type==="individual"?"Sesión individual":"Entrenamiento grupal";
-      if(s0)Object.assign(s0,d);else S.sessions.push(d);U.day=d.date;U.month=d.date.slice(0,7);closeModal();save("Sesión guardada")};
+      delete d._autoTitle;if(s0)Object.assign(s0,d);else S.sessions.push(d);U.day=d.date;U.month=d.date.slice(0,7);closeModal();save("Sesión guardada")};
   }
   draw();
 }
